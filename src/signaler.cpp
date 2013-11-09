@@ -302,7 +302,31 @@ int zmq::signaler_t::make_fdpair (fd_t *r_, fd_t *w_)
     //  This function has to be in a system-wide critical section so that
     //  two instances of the library don't accidentally create signaler
     //  crossing the process boundary.
-    //  We'll use named event object to implement the critical section.
+    //  We'll use named mutex object to implement the critical section.
+    //  Note that if the mutex object already exists, the CreateMutex requests
+    //  MUTEX_ALL_ACCESS access right. If this fails, we try to open
+    //  the mutex object asking for SYNCHRONIZE access only.
+#   if !defined _WIN32_WCE
+    HANDLE mutex = CreateMutex (&sa, FALSE, TEXT ("Global\\zmq-signal-port-mutex"));
+#   else
+    HANDLE mutex = CreateMutex (NULL, FALSE, TEXT ("Global\\zmq-signal-port-mutex"));
+#   endif
+    //  Note that MUTEX_MODIFY_STATE is marked as "Reserved for future use"
+    if (mutex == NULL && GetLastError () == ERROR_ACCESS_DENIED)
+        mutex = OpenMutex (SYNCHRONIZE,
+                          FALSE, TEXT ("Global\\zmq-signaler-port-mutex"));
+
+    win_assert (mutex != NULL);
+
+    //  Enter the critical section.
+    DWORD dwrc = WaitForSingleObject (mutex, INFINITE);
+    zmq_assert (dwrc == WAIT_OBJECT_0 || dwrc == WAIT_ABANDONED);
+
+#   if !defined ZMQ_NO_BACKWARDS_COMPATIBLE_SIGNALER_PORT
+    //  To be backwards compatible with older versions of ZeroMQ that
+    //  implemented the critical section with a named event object,
+    //  we'll also attempt to acquire the event.
+
     //  Note that if the event object already exists, the CreateEvent requests
     //  EVENT_ALL_ACCESS access right. If this fails, we try to open
     //  the event object asking for SYNCHRONIZE access only.
@@ -318,8 +342,13 @@ int zmq::signaler_t::make_fdpair (fd_t *r_, fd_t *w_)
     win_assert (sync != NULL);
 
     //  Enter the critical section.
-    DWORD dwrc = WaitForSingleObject (sync, INFINITE);
-    zmq_assert (dwrc == WAIT_OBJECT_0);
+    //  If we get a timeout, we assume that the application holding the
+    //  event object has aborted without releasing the event object.
+    //  In this case, we assume ownership and will release the event at
+    //  the end.
+    dwrc = WaitForSingleObject (sync, 1000);
+    zmq_assert (dwrc == WAIT_OBJECT_0 || dwrc == WAIT_TIMEOUT);
+#   endif
 
     //  Windows has no 'socketpair' function. CreatePipe is no good as pipe
     //  handles cannot be polled on. Here we create the socketpair by hand.
@@ -388,12 +417,22 @@ int zmq::signaler_t::make_fdpair (fd_t *r_, fd_t *w_)
     rc = closesocket (listener);
     wsa_assert (rc != SOCKET_ERROR);
 
+#   if !defined ZMQ_NO_BACKWARDS_COMPATIBLE_SIGNALER_PORT
     //  Exit the critical section.
     brc = SetEvent (sync);
     win_assert (brc != 0);
 
     //  Release the kernel object
     brc = CloseHandle (sync);
+    win_assert (brc != 0);
+#   endif
+
+    //  Exit the critical section.
+    brc = ReleaseMutex (mutex);
+    win_assert (brc != 0);
+
+    //  Release the kernel object
+    brc = CloseHandle (mutex);
     win_assert (brc != 0);
 
     if (*r_ != INVALID_SOCKET) {
