@@ -318,10 +318,6 @@ int zmq::signaler_t::make_fdpair (fd_t *r_, fd_t *w_)
 
     win_assert (mutex != NULL);
 
-    //  Enter the critical section.
-    DWORD dwrc = WaitForSingleObject (mutex, INFINITE);
-    zmq_assert (dwrc == WAIT_OBJECT_0 || dwrc == WAIT_ABANDONED);
-
 #   if !defined ZMQ_NO_BACKWARDS_COMPATIBLE_SIGNALER_PORT
     //  To be backwards compatible with older versions of ZeroMQ that
     //  implemented the critical section with a named event object,
@@ -340,6 +336,7 @@ int zmq::signaler_t::make_fdpair (fd_t *r_, fd_t *w_)
                           FALSE, TEXT ("Global\\zmq-signaler-port-sync"));
 
     win_assert (sync != NULL);
+#   endif
 
     //  Windows has no 'socketpair' function. CreatePipe is no good as pipe
     //  handles cannot be polled on. Here we create the socketpair by hand.
@@ -378,8 +375,14 @@ int zmq::signaler_t::make_fdpair (fd_t *r_, fd_t *w_)
     wsa_assert (rc != SOCKET_ERROR);
 
     //  Enter the critical section.
-    DWORD dwrc = WaitForSingleObject (sync, INFINITE);
+    DWORD dwrc = WaitForSingleObject (mutex, INFINITE);
+    zmq_assert (dwrc == WAIT_OBJECT_0 || dwrc == WAIT_ABANDONED);
+
+#   if !defined ZMQ_NO_BACKWARDS_COMPATIBLE_SIGNALER_PORT
+    //  Enter the critical section.
+    dwrc = WaitForSingleObject (sync, INFINITE);
     zmq_assert (dwrc == WAIT_OBJECT_0);
+#   endif
 
     //  Bind listening socket to signaler port.
     rc = bind (listener, (const struct sockaddr*) &addr, sizeof (addr));
@@ -404,9 +407,10 @@ int zmq::signaler_t::make_fdpair (fd_t *r_, fd_t *w_)
     //  We don't need the listening socket anymore. Close it.
     closesocket (listener);
 
+    BOOL brc;
 #   if !defined ZMQ_NO_BACKWARDS_COMPATIBLE_SIGNALER_PORT
     //  Exit the critical section.
-    BOOL brc = SetEvent (sync);
+    brc = SetEvent (sync);
     win_assert (brc != 0);
 
     //  Release the kernel object
